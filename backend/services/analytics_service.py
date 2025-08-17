@@ -1,17 +1,16 @@
 # backend/services/analytics_service.py
 
-from backend.models import db, SinhVien, KetQuaHocTap, HocPhan, SystemConfig, LopHoc
 from sqlalchemy import func, case, and_
+from ..models import db, SinhVien, KetQuaHocTap, HocPhan, SystemConfig, LopHoc
 
 
 def get_system_configs():
     """
     Tải và chuyển đổi các cấu hình hệ thống từ chuỗi sang đúng kiểu dữ liệu.
-    Hàm này có thể cache kết quả để tăng hiệu năng trong môi trường thực tế.
+    Có thể cache kết quả trong môi trường production.
     """
     configs = SystemConfig.query.all()
     config_map = {c.ConfigKey: c.ConfigValue for c in configs}
-
     try:
         return {
             'gpa_excellent': float(config_map.get('GPA_GIOI_THRESHOLD', 3.6)),
@@ -20,75 +19,87 @@ def get_system_configs():
             'credits_warning': int(config_map.get('TINCHI_NO_CANHCAO_THRESHOLD', 8))
         }
     except (ValueError, TypeError):
-        # Trả về giá trị mặc định an toàn nếu cấu hình trong CSDL bị lỗi
-        return {
-            'gpa_excellent': 3.6, 'gpa_good': 2.5, 'gpa_average': 2.0, 'credits_warning': 8
-        }
+        # Giá trị mặc định an toàn
+        return {'gpa_excellent': 3.6, 'gpa_good': 2.5, 'gpa_average': 2.0, 'credits_warning': 8}
 
 
 def get_dashboard_analytics(ma_nganh=None):
     """
-    Tính toán và tổng hợp TẤT CẢ các chỉ số cần thiết cho Dashboard Admin.
-    Thực hiện các truy vấn phức tạp nhưng hiệu quả để giảm tải cho CSDL.
+    Tính toán và tổng hợp các chỉ số cho Dashboard Admin.
+    Hỗ trợ lọc theo mã ngành nếu truyền ma_nganh.
     """
-    configs = get_system_configs()
+    cfg = get_system_configs()
 
-    # --- 1. Subquery: Tính toán GPA và Tín chỉ nợ cho mỗi sinh viên ---
-    # Đây là nền tảng cho mọi tính toán sau này.
-    gpa_subquery = db.session.query(
+    # --- 1) Subquery GPA & Tín chỉ nợ cho mỗi SV ---
+    gpa_subq = db.session.query(
         KetQuaHocTap.MaSV,
-        (
-                func.sum(KetQuaHocTap.DiemHe4 * HocPhan.SoTinChi) /
-                func.sum(HocPhan.SoTinChi)
-        ).label('gpa'),
-        func.sum(
-            case((KetQuaHocTap.DiemHe4 == 0, HocPhan.SoTinChi), else_=0)
-        ).label('credits_debt')
-    ).join(HocPhan, HocPhan.MaHP == KetQuaHocTap.MaHP
-           ).filter(
-        HocPhan.TinhDiemTichLuy == True,
-        KetQuaHocTap.LaDiemCuoiCung == True
-    ).group_by(KetQuaHocTap.MaSV).subquery()
+        (func.sum(KetQuaHocTap.DiemHe4 * HocPhan.SoTinChi) / func.sum(HocPhan.SoTinChi)).label('gpa'),
+        func.sum(case((KetQuaHocTap.DiemHe4 == 0, HocPhan.SoTinChi), else_=0)).label('credits_debt')
+    ).join(HocPhan, HocPhan.MaHP == KetQuaHocTap.MaHP) \
+     .filter(HocPhan.TinhDiemTichLuy.is_(True),
+             KetQuaHocTap.LaDiemCuoiCung.is_(True)) \
+     .group_by(KetQuaHocTap.MaSV) \
+     .subquery()
 
-    # --- 2. Thống kê Sinh viên ---
-    # Query chính để đếm tổng số SV, SV xuất sắc, SV bị cảnh cáo
-    student_stats_query = db.session.query(
+    # --- 2) Thống kê SV theo ngưỡng ---
+    student_stats_q = db.session.query(
         func.count(SinhVien.MaSV).label('total_students'),
-        func.sum(case((gpa_subquery.c.gpa >= configs['gpa_excellent'], 1), else_=0)).label('excellent_students'),
-        func.sum(
-            case((and_(gpa_subquery.c.gpa >= configs['gpa_good'], gpa_subquery.c.gpa < configs['gpa_excellent']), 1),
-                 else_=0)).label('good_students'),
-        func.sum(case((and_(gpa_subquery.c.gpa >= configs['gpa_average'], gpa_subquery.c.gpa < configs['gpa_good']), 1),
-                      else_=0)).label('average_students'),
-        func.sum(case((gpa_subquery.c.gpa < configs['gpa_average'], 1), else_=0)).label('weak_students')
-    ).select_from(SinhVien).join(gpa_subquery, SinhVien.MaSV == gpa_subquery.c.MaSV, isouter=True)
+        func.sum(case((gpa_subq.c.gpa >= cfg['gpa_excellent'], 1), else_=0)).label('excellent_students'),
+        func.sum(case((and_(gpa_subq.c.gpa >= cfg['gpa_good'], gpa_subq.c.gpa < cfg['gpa_excellent']), 1), else_=0)).label('good_students'),
+        func.sum(case((and_(gpa_subq.c.gpa >= cfg['gpa_average'], gpa_subq.c.gpa < cfg['gpa_good']), 1), else_=0)).label('average_students'),
+        func.sum(case((gpa_subq.c.gpa < cfg['gpa_average'], 1), else_=0)).label('weak_students'),
+    ).select_from(SinhVien).join(gpa_subq, SinhVien.MaSV == gpa_subq.c.MaSV, isouter=True)
 
-    # Áp dụng bộ lọc ngành nếu được cung cấp
     if ma_nganh:
-        student_stats_query = student_stats_query.join(LopHoc, SinhVien.MaLop == LopHoc.MaLop).filter(
-            LopHoc.MaNganh == ma_nganh)
+        student_stats_q = student_stats_q.join(LopHoc, SinhVien.MaLop == LopHoc.MaLop).filter(LopHoc.MaNganh == ma_nganh)
 
-    student_stats = student_stats_query.one_or_none()
+    student_stats = student_stats_q.one_or_none()
 
-    # --- 3. Lấy danh sách Sinh viên cần quan tâm ---
-    students_at_risk_query = db.session.query(
-        SinhVien.HoTen, gpa_subquery.c.gpa, gpa_subquery.c.credits_debt
-    ).join(gpa_subquery, SinhVien.MaSV == gpa_subquery.c.MaSV
-           ).filter(
-        gpa_subquery.c.gpa < configs['gpa_average']
-    ).order_by(gpa_subquery.c.gpa.asc()).limit(5)
-    if ma_nganh: students_at_risk_query = students_at_risk_query.join(LopHoc, SinhVien.MaLop == LopHoc.MaLop).filter(
-        LopHoc.MaNganh == ma_nganh)
-    students_at_risk = students_at_risk_query.all()
+    # --- 3) SV có nguy cơ (gpa < trung bình) ---
+    students_at_risk_q = db.session.query(
+        SinhVien.HoTen, gpa_subq.c.gpa, gpa_subq.c.credits_debt
+    ).join(gpa_subq, SinhVien.MaSV == gpa_subq.c.MaSV) \
+     .filter(gpa_subq.c.gpa < cfg['gpa_average']) \
+     .order_by(gpa_subq.c.gpa.asc()) \
+     .limit(5)
 
-    # --- 4. Top các môn có tỷ lệ trượt cao nhất ---
-    # ... (Logic này phức tạp và sẽ được triển khai sau, tạm thời trả về dữ liệu giả)
-    top_failing_courses = [
-        {"TenHP": "Triết học Mác - Lênin", "failure_rate": 15.2},
-        {"TenHP": "Giải tích 2", "failure_rate": 12.8}
-    ]
+    if ma_nganh:
+        students_at_risk_q = students_at_risk_q.join(LopHoc, SinhVien.MaLop == LopHoc.MaLop).filter(LopHoc.MaNganh == ma_nganh)
 
-    # --- 5. Tổng hợp kết quả ---
+    students_at_risk = students_at_risk_q.all()
+
+    # --- 4) Top môn có tỷ lệ trượt cao (tính thật) ---
+    # failed = điểm hệ 4 == 0; total = tổng lần ghi nhận điểm cuối cùng của môn; chỉ tính môn được tính tích lũy
+    course_fail_q = db.session.query(
+        HocPhan.MaHP,
+        HocPhan.TenHP,
+        func.count(KetQuaHocTap.MaKQ).label('total'),
+        func.sum(case((KetQuaHocTap.DiemHe4 == 0, 1), else_=0)).label('failed')
+    ).join(HocPhan, HocPhan.MaHP == KetQuaHocTap.MaHP) \
+     .join(SinhVien, SinhVien.MaSV == KetQuaHocTap.MaSV) \
+     .join(LopHoc, LopHoc.MaLop == SinhVien.MaLop, isouter=True) \
+     .filter(KetQuaHocTap.LaDiemCuoiCung.is_(True),
+             HocPhan.TinhDiemTichLuy.is_(True))
+
+    if ma_nganh:
+        course_fail_q = course_fail_q.filter(LopHoc.MaNganh == ma_nganh)
+
+    course_fail_q = course_fail_q.group_by(HocPhan.MaHP, HocPhan.TenHP) \
+                                 .having(func.count(KetQuaHocTap.MaKQ) > 0) \
+                                 .order_by((func.sum(case((KetQuaHocTap.DiemHe4 == 0, 1), else_=0)) * 1.0 /
+                                            func.count(KetQuaHocTap.MaKQ)).desc()) \
+                                 .limit(10)
+
+    course_fail_rows = course_fail_q.all()
+    top_failing_courses = [{
+        "MaHP": r.MaHP,
+        "TenHP": r.TenHP,
+        "failure_rate": round((float(r.failed) / float(r.total)) * 100.0, 2) if r.total else 0.0,
+        "failed": int(r.failed),
+        "total": int(r.total),
+    } for r in course_fail_rows]
+
+    # --- 5) Tổng hợp kết quả ---
     return {
         "kpis": {
             "total_students": student_stats.total_students if student_stats else 0,

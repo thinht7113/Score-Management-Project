@@ -2,7 +2,8 @@
 import pandas as pd
 from datetime import datetime
 from passlib.hash import bcrypt
-from models import db, HocPhan, SinhVien, NguoiDung, LopHoc, VaiTro, NganhHoc, KetQuaHocTap, ChuongTrinhDaoTao
+from .models import db, HocPhan, SinhVien, NguoiDung, LopHoc, VaiTro, NganhHoc, KetQuaHocTap, ChuongTrinhDaoTao
+
 
 
 def parse_date(date_string, student_id):
