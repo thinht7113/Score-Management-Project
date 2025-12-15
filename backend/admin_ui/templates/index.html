@@ -1,0 +1,327 @@
+<!doctype html>
+<html lang="vi" data-bs-theme="auto">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Admin · Score Management</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.css" rel="stylesheet">
+  <link href="{{ url_for('admin_ui.static', filename='css.css') }}" rel="stylesheet">
+</head>
+<body>
+  <!-- Topbar -->
+  <nav class="navbar navbar-expand-lg bg-body-tertiary shadow-sm sticky-top">
+    <div class="container-fluid">
+      <button class="btn btn-outline-primary me-2 d-lg-none" id="btnNav" aria-label="Mở/đóng menu">
+        <i class="bi bi-list"></i>
+      </button>
+
+      <a class="navbar-brand d-flex align-items-center gap-2" href="#" aria-label="Trang chủ Admin">
+        <i class="bi bi-mortarboard-fill"></i>
+        <span>Admin</span>
+      </a>
+
+      <div class="ms-auto d-flex align-items-center gap-3">
+        <span id="themeLabel" class="text-muted small d-none d-sm-inline">Theme: auto</span>
+        <button id="btnTheme" class="btn btn-outline-secondary btn-sm"><i class="bi bi-moon-stars"></i> Đổi theme</button>
+        <span id="whoami" class="text-body-secondary small d-none d-md-inline">—</span>
+        <button id="btnLogin" class="btn btn-primary btn-sm"><i class="bi bi-box-arrow-in-right"></i> Đăng nhập</button>
+        <button id="btnLogout" class="btn btn-outline-secondary btn-sm"><i class="bi bi-box-arrow-right"></i> Đăng xuất</button>
+      </div>
+    </div>
+  </nav>
+
+  <!-- Main layout -->
+  <div class="container-fluid">
+    <div class="row">
+      <!-- Sidebar -->
+      <aside class="col-lg-3 col-xl-2 sidebar border-end">
+        <div class="p-3">
+          <div class="fw-bold text-uppercase small text-secondary mb-2">Menu</div>
+          <div id="menu" class="nav flex-column gap-1">
+            <a href="#" class="nav-link active" data-page="page-dashboard"><i class="bi bi-speedometer2 me-2"></i>Bảng điều khiển</a>
+            <a href="#" class="nav-link" data-page="page-import"><i class="bi bi-upload me-2"></i>Nhập dữ liệu</a>
+            <a href="#" class="nav-link" data-page="page-students"><i class="bi bi-people me-2"></i>Sinh viên</a>
+            <a href="#" class="nav-link" data-page="page-users"><i class="bi bi-person-gear me-2"></i>Người dùng</a>
+            <a href="#" class="nav-link" data-page="page-configs"><i class="bi bi-gear-wide-connected me-2"></i>Cấu hình</a>
+            <a href="#" class="nav-link" data-page="page-warnings"><i class="bi bi-exclamation-triangle me-2"></i>Cảnh báo</a>
+            <a href="#" class="nav-link" data-page="page-logs"><i class="bi bi-clock-history me-2"></i>Nhật ký</a>
+            <a href="#" class="nav-link" data-page="page-catalog"><i class="bi bi-journal-text me-2"></i>Danh mục</a>
+          </div>
+        </div>
+      </aside>
+
+      <!-- Content -->
+      <main class="col-lg-9 col-xl-10 content p-3">
+        <!-- Dashboard -->
+        <section id="page-dashboard" class="page">
+          <div class="row g-3">
+            <div class="col-md-4">
+              <div class="card glass"><div class="card-body">
+                <div class="text-secondary small">Tổng sinh viên</div>
+                <div class="display-6 fw-bold" id="kpiStudents">—</div>
+              </div></div>
+            </div>
+            <div class="col-md-4">
+              <div class="card glass"><div class="card-body">
+                <div class="text-secondary small">Tổng học phần</div>
+                <div class="display-6 fw-bold" id="kpiCourses">—</div>
+              </div></div>
+            </div>
+            <div class="col-md-4">
+              <div class="card glass"><div class="card-body">
+                <div class="d-flex align-items-center justify-content-between">
+                  <div>
+                    <div class="text-secondary small">Tỷ lệ qua</div>
+                    <div class="display-6 fw-bold" id="kpiPassRate">—</div>
+                  </div>
+                  <span class="badge text-bg-primary">KPI</span>
+                </div>
+              </div></div>
+            </div>
+          </div>
+        </section>
+
+        <!-- Import -->
+        <section id="page-import" class="page d-none">
+          <div class="card">
+            <div class="card-header">
+              <div class="d-flex align-items-center gap-2">
+                <i class="bi bi-upload"></i><span>Nhập dữ liệu</span>
+                <span id="im_mode_badge" class="badge text-bg-secondary ms-2">Preview</span>
+              </div>
+              <div class="d-flex gap-2">
+                <a id="dlRosterTpl" class="btn btn-outline-secondary btn-sm" href="#" download>📄 Mẫu Roster</a>
+                <a id="dlGradesTpl" class="btn btn-outline-secondary btn-sm" href="#" download>📄 Mẫu Bảng điểm</a>
+              </div>
+            </div>
+            <div class="card-body">
+              <div class="row g-3">
+                <div class="col-xl-3 col-md-4">
+                  <label class="form-label">Loại nhập</label>
+                  <select id="im_kind" class="form-select">
+                    <option value="grades">Bảng điểm theo lớp</option>
+                    <option value="roster">Danh sách lớp (Roster)</option>
+                    <option value="curriculum">Chương trình đào tạo (CTĐT)</option>
+                  </select>
+                </div>
+                <div class="col-xl-3 col-md-4">
+                  <label class="form-label">Lớp</label>
+                  <select id="im_class" class="form-select"><option value="">-- Chọn lớp --</option></select>
+                </div>
+                <div class="col-md-2">
+                  <label class="form-label">Học kỳ</label>
+                  <input id="im_semester" class="form-control" placeholder="VD: 2024-2025-1">
+                </div>
+                <div class="col-md-2">
+                  <label class="form-label">Thi lại</label>
+                  <select id="im_policy" class="form-select">
+                    <option value="">Mặc định hệ thống</option>
+                    <option value="keep-latest">Giữ lần gần nhất</option>
+                    <option value="best">Lấy điểm cao nhất</option>
+                  </select>
+                </div>
+                <div class="col-md-2 d-flex align-items-end">
+                  <div class="form-check">
+                    <input class="form-check-input" type="checkbox" id="im_allow_update">
+                    <label class="form-check-label" for="im_allow_update">Cho phép cập nhật</label>
+                  </div>
+                </div>
+
+                <!-- Fuzzy toggle -->
+                <div class="col-md-4">
+                  <div class="form-check mt-2">
+                    <input class="form-check-input" type="checkbox" id="im_apply_fuzzy">
+                    <label for="im_apply_fuzzy" class="form-check-label">Áp dụng khớp gần (fuzzy) khi ghi</label>
+                  </div>
+                  <div class="input-group input-group-sm mt-1" style="max-width:200px">
+                    <span class="input-group-text">Ngưỡng</span>
+                    <input id="im_fuzzy_th" type="number" step="0.01" min="0.5" max="0.99" value="0.78" class="form-control">
+                  </div>
+                </div>
+
+                <!-- Dropzone -->
+                <div class="col-12">
+                  <label class="form-label">File dữ liệu</label>
+                  <div id="dropzone" class="dropzone">
+                    <input id="im_file" type="file" class="form-control" style="display:none">
+                    <div class="dz-invite">
+                      <i class="bi bi-cloud-arrow-up"></i>
+                      <div>Kéo thả file vào đây hoặc <button type="button" class="btn btn-sm btn-primary" id="pickFileBtn">Chọn file</button></div>
+                      <div id="pickedName" class="text-muted small mt-1"></div>
+                    </div>
+                  </div>
+                </div>
+
+                <!-- Actions -->
+                <div class="col-12 d-flex gap-2 sticky-actions">
+                  <button id="btnPreview" class="btn btn-warning"><i class="bi bi-eye"></i> Preview</button>
+                  <button id="btnCommit" class="btn btn-success"><i class="bi bi-check2-circle"></i> Ghi chính thức</button>
+                  <div id="im_progress" class="progress ms-auto" style="width:240px; display:none">
+                    <div class="progress-bar" role="progressbar" style="width:0%"></div>
+                  </div>
+                </div>
+
+                <!-- Result -->
+                <div class="col-lg-4">
+                  <div class="card h-100 glass"><div class="card-header">Tóm tắt</div>
+                    <div class="card-body" id="im_summary">—</div>
+                  </div>
+                </div>
+                <div class="col-lg-8">
+                  <div class="card h-100 glass"><div class="card-header">Preview</div>
+                    <div class="card-body" id="im_preview_table"></div>
+                  </div>
+                </div>
+                <div class="col-12">
+                  <div class="card glass"><div class="card-header">Cảnh báo / Lỗi</div>
+                    <div class="card-body" id="im_issues"><span class="text-success">Không có cảnh báo.</span></div>
+                  </div>
+                </div>
+
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- Students / Users / Configs / Warnings / Logs / Catalog -->
+        <!-- (giữ IDs & cấu trúc để JS hoạt động; giao diện card đã đẹp hơn) -->
+        <section id="page-students" class="page d-none">
+          <div class="card glass">
+            <div class="card-header d-flex justify-content-between align-items-center">
+              <span><i class="bi bi-people me-2"></i>Sinh viên</span>
+              <button id="btnAddStudent" class="btn btn-sm btn-primary">Thêm</button>
+            </div>
+            <div class="card-body">
+              <div class="row g-2 mb-2">
+                <div class="col-md-4"><input id="stu_q" class="form-control" placeholder="Tìm theo mã/tên/email"></div>
+                <div class="col-md-3"><select id="stu_class" class="form-select"><option value="">-- Lọc theo lớp --</option></select></div>
+                <div class="col-md-2"><button id="stu_search_btn" class="btn btn-primary w-100">Tìm</button></div>
+              </div>
+              <div id="stu_table">—</div>
+            </div>
+          </div>
+        </section>
+
+        <section id="page-users" class="page d-none"><div class="card glass"><div class="card-header"><i class="bi bi-person-gear me-2"></i>Người dùng</div><div class="card-body"><div id="user_table">—</div></div></div></section>
+        <section id="page-configs" class="page d-none"><div class="card glass"><div class="card-header"><i class="bi bi-gear-wide-connected me-2"></i>Cấu hình</div><div class="card-body"><div id="cfg_table">—</div></div></div></section>
+        <section id="page-warnings" class="page d-none"><div class="card glass"><div class="card-header d-flex justify-content-between align-items-center"><span><i class="bi bi-exclamation-triangle me-2"></i>Cảnh báo học vụ</span><button id="warn_scan_btn" class="btn btn-sm btn-primary">Quét cảnh báo</button></div><div class="card-body"><div class="row g-3"><div class="col-lg-5"><div class="card h-100"><div class="card-header">Rule</div><div class="card-body" id="warn_rules">—</div></div></div><div class="col-lg-7"><div class="card h-100"><div class="card-header">Danh sách cảnh báo</div><div class="card-body" id="warn_cases">—</div></div></div></div></div></div></section>
+        <section id="page-logs" class="page d-none"><div class="card glass"><div class="card-header"><i class="bi bi-clock-history me-2"></i>Nhật ký</div><div class="card-body" id="log_table">—</div></div></section>
+        <section id="page-catalog" class="page d-none">
+          <div class="row g-3">
+            <div class="col-lg-4"><div class="card h-100 glass"><div class="card-header d-flex justify-content-between align-items-center"><span>Ngành</span><button id="btnAddMajor" class="btn btn-sm btn-primary">Thêm</button></div><div class="card-body" id="cat_majors">—</div></div></div>
+            <div class="col-lg-4"><div class="card h-100 glass"><div class="card-header d-flex justify-content-between align-items-center"><span>Lớp</span><button id="btnAddClass" class="btn btn-sm btn-primary">Thêm</button></div><div class="card-body" id="cat_classes">—</div></div></div>
+            <div class="col-lg-4"><div class="card h-100 glass"><div class="card-header d-flex justify-content-between align-items-center"><span>Học phần</span><button id="btnAddCourse" class="btn btn-sm btn-primary">Thêm</button></div><div class="card-body" id="cat_courses">—</div></div></div>
+          </div>
+        </section>
+
+      </main>
+    </div>
+  </div>
+
+  <!-- Toast -->
+  <div class="toast-container position-fixed top-0 end-0 p-3">
+    <div id="toast" class="toast align-items-center text-bg-info border-0" role="alert" aria-live="assertive" aria-atomic="true">
+      <div class="d-flex">
+        <div class="toast-body">Thông báo</div>
+        <button type="button" class="btn-close btn-close-white me-2 m-auto" data-bs-dismiss="toast" aria-label="Đóng"></button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Modals: Login -->
+  <div class="modal fade" id="loginModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog">
+      <div class="modal-content">
+        <div class="modal-header"><h5 class="modal-title">Đăng nhập</h5>
+          <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Đóng"></button>
+        </div>
+        <div class="modal-body">
+          <div class="mb-3">
+            <label class="form-label">Email / Username</label>
+            <input id="loginEmail" class="form-control" autocomplete="username">
+          </div>
+          <div class="mb-3">
+            <label class="form-label">Mật khẩu</label>
+            <input id="loginPass" type="password" class="form-control" autocomplete="current-password">
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Hủy</button>
+          <button id="btnLoginSubmit" type="button" class="btn btn-primary">Đăng nhập</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Modal: Chi tiết sinh viên -->
+  <div class="modal fade" id="stuDetailModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-lg modal-dialog-scrollable">
+      <div class="modal-content">
+        <div class="modal-header"><h5 class="modal-title">Chi tiết sinh viên</h5>
+          <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Đóng"></button>
+        </div>
+        <div class="modal-body"><!-- JS sẽ render nội dung --></div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Đóng</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Modal: Thêm/Sửa sinh viên -->
+  <div class="modal fade" id="studentEditModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog">
+      <div class="modal-content">
+        <div class="modal-header"><h5 class="modal-title">Sinh viên</h5>
+          <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Đóng"></button>
+        </div>
+        <div class="modal-body">
+          <div class="mb-2">
+            <label class="form-label">Mã SV</label>
+            <input id="sv_ma" class="form-control">
+          </div>
+          <div class="mb-2">
+            <label class="form-label">Họ tên</label>
+            <input id="sv_ten" class="form-control">
+          </div>
+          <div class="mb-2">
+            <label class="form-label">Lớp</label>
+            <input id="sv_lop" class="form-control">
+          </div>
+          <div class="mb-2">
+            <label class="form-label">Email</label>
+            <input id="sv_email" class="form-control" type="email">
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Hủy</button>
+          <button id="sv_save_btn" type="button" class="btn btn-primary">Lưu</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Modal: Danh mục (Ngành/Lớp/Học phần) -->
+  <div class="modal fade" id="catalogEditModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog">
+      <div class="modal-content">
+        <div class="modal-header"><h5 class="modal-title">Danh mục</h5>
+          <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Đóng"></button>
+        </div>
+        <div class="modal-body">
+          <div id="cat_form" class="row g-2"><!-- JS sẽ bơm input động --></div>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Hủy</button>
+          <button id="cat_save_btn" type="button" class="btn btn-primary">Lưu</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Scripts -->
+  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+  <script src="{{ url_for('admin_ui.static', filename='javascript.js') }}"></script>
+</body>
+</html>
