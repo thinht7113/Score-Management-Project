@@ -65,8 +65,6 @@ pip install -r requirements.txt
 ### Bước 2: Cấu hình môi trường
 Tạo file `.env` trong thư mục `backend` (hoặc root tùy cấu hình) với nội dung:
 ```env
-# Cấu hình Database
-SQLALCHEMY_DATABASE_URI=sqlite:///app.db
 
 # Cấu hình Google Gemini AI (cho tính năng Cố vấn)
 GEMINI_API_KEY=YOUR_API_KEY_HERE
