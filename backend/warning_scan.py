@@ -3,46 +3,19 @@ from .models import db, SinhVien, KetQuaHocTap, WarningRule, WarningCase, HocPha
 from datetime import datetime
 
 def scan_all_warnings():
-    """
-    Quét toàn bộ sinh viên và áp dụng các rule cảnh báo đang active.
-    Trả về: {"total_cases": int, "new_cases": int}
-    """
-    # 1. Lấy danh sách rules
+    
+    
     rules = WarningRule.query.filter_by(Active=True).all()
     if not rules:
         return {"msg": "Không có rule nào được kích hoạt"}
-
-    # 2. Xóa các warning cũ (đang open) của các rule này để tái tạo (hoặc giữ lại tùy business logic)
-    # Ở đây chọn cách: Xóa các cảnh báo OPEN cũ của các rule này, sau đó tạo mới dựa trên dữ liệu hiện tại.
-    # Để đơn giản và tránh duplicate ngày qua ngày.
     rule_ids = [r.Id for r in rules]
     db.session.query(WarningCase).filter(
         WarningCase.RuleId.in_(rule_ids),
         WarningCase.Status == "open"
     ).delete(synchronize_session=False)
 
-    # 3. Lấy tất cả sinh viên & kết quả học tập
-    # Để tối ưu, ta có thể load eager hoặc query aggregate. 
-    # Tuy nhiên với số lượng SV nhỏ (< vài ngàn), loop query cũng tạm chấp nhận được.
-    # Tốt hơn là query aggregate.
-
     new_cases_count = 0
     now = datetime.utcnow()
-
-    # Pre-fetch data for "GPA" rules or "Fail Count" rules
-    # Tính toán chỉ số cho từng sinh viên
-    # a. GPA / Avg Score
-    # Lưu ý: Hệ thống dùng DiemHe4 và DiemHe10.
-    
-    # Query: MaSV, Sum(Diem*TinChi), Sum(TinChi), Count(Fail)
-    # Cần logic tính điểm:
-    #   - GPA (Hệ 4): Sum(DiemHe4 * SoTinChi) / Sum(SoTinChi)
-    #   - AVG (Hệ 10): Sum(DiemHe10 * SoTinChi) / Sum(SoTinChi) (hoặc avg đơn thuần tùy quy chế)
-    #   - FAIL: Số môn F (DiemHe10 < 4.0)
-
-    # Query: MaSV, Sum(Diem*TinChi), Sum(TinChi), Count(Fail)
-    
-    # Sử dụng select statement với join để lấy SoTinChi từ bảng HocPhan
     stmt = sa.select(
         KetQuaHocTap.MaSV, 
         KetQuaHocTap.DiemHe10, 
@@ -52,9 +25,6 @@ def scan_all_warnings():
     ).select_from(KetQuaHocTap).join(HocPhan, KetQuaHocTap.MaHP == HocPhan.MaHP)
     
     rows = db.session.execute(stmt).all()
-
-    # Aggregate in memory (python) faster for complex logic than SQL sometimes 
-    # Data struct: sv_stats = { 'SV01': { 'sum_p4': 0, 'sum_p10': 0, 'sum_tc': 0, 'fail_cnt': 0, 'fails_credit': 0 } }
     sv_stats = {}
 
     for masv, d10, d4, dchu, stc in rows:
@@ -75,7 +45,6 @@ def scan_all_warnings():
             stat['fails'] += 1
             stat['fails_credit'] += stc
 
-    # Apply rules
     cases_to_add = []
     
     for r in rules:
@@ -109,13 +78,6 @@ def scan_all_warnings():
                     msg = f"Số môn nợ: {int(val)} >= {int(th)}"
             
             elif code == "DEBT_OVER":
-                # Logic nợ tín chỉ: Tổng tín chỉ của các môn bị F (chưa qua)
-                # Fail logic: DiemHe10 < 4.0 or DiemChu = F
-                # Cần tính tổng tín chỉ fails
-                fails_credit = 0
-                # Cần loop lại chi tiết môn học để tính chính xác (hoặc tính trong loop ban đầu)
-                # Đoạn code trên chỉ đếm số môn fails (fails count).
-                # Ta cần sửa logic gom nhóm ban đầu để tính fails_credit
                 val = float(stat.get('fails_credit', 0))
                 if val >= th:
                     is_warn = True
