@@ -2,12 +2,12 @@
 
 
 from __future__ import annotations
-from functools import wraps
-from io import BytesIO
+from io import BytesIO, StringIO
+import csv
 from typing import Any, Dict
 
 import sqlalchemy as sa
-from flask import Blueprint, request, jsonify, send_file
+from flask import Blueprint, request, jsonify, send_file, Response
 from flask_jwt_extended import jwt_required, get_jwt, get_jwt_identity
 from passlib.hash import bcrypt
 
@@ -19,6 +19,7 @@ from .models import (
     WarningRule, WarningCase,
     ImportLog,
 )
+from .utils import roles_required
 
 try:
     from . import importer as _importer
@@ -28,17 +29,25 @@ except Exception:
 bp = Blueprint("admin_crud", __name__)
 crud_bp = bp
 
-def roles_required(*roles: str):
-    def deco(fn):
-        @wraps(fn)
-        @jwt_required()
-        def wrapped(*args, **kwargs):
-            role = (get_jwt() or {}).get("role")
-            if roles and role not in roles:
-                return jsonify({"msg": "Forbidden"}), 403
-            return fn(*args, **kwargs)
-        return wrapped
-    return deco
+ALLOWED_CONFIG_KEYS = [
+    "GPA_GIOI_THRESHOLD",
+    "GPA_KHA_THRESHOLD",
+    "GPA_TRUNGBINH_THRESHOLD",
+    "TINCHI_NO_CANHCAO_THRESHOLD",
+    "EMAIL_DOMAIN",
+    "DEFAULT_MAJOR",
+    "RETAKE_POLICY_DEFAULT",
+]
+
+CONFIG_META = {
+    "GPA_GIOI_THRESHOLD": "Ngưỡng GPA xếp loại Giỏi",
+    "GPA_KHA_THRESHOLD": "Ngưỡng GPA xếp loại Khá",
+    "GPA_TRUNGBINH_THRESHOLD": "Ngưỡng GPA Cảnh báo",
+    "TINCHI_NO_CANHCAO_THRESHOLD": "Số tín chỉ nợ để cảnh báo",
+    "EMAIL_DOMAIN": "Tên miền email nội bộ",
+    "DEFAULT_MAJOR": "Mã ngành mặc định khi chưa xác định",
+    "RETAKE_POLICY_DEFAULT": "Chính sách thi lại mặc định (keep-latest|best)",
+}
 
 def ok(data: Any = None, **kw):
     res = {"ok": True}
@@ -56,47 +65,6 @@ def json_body() -> Dict[str, Any]:
 def _email_domain() -> str:
     row = db.session.get(SystemConfig, "EMAIL_DOMAIN")
     return (row.ConfigValue if row else "vui.edu.vn")
-
-@bp.get("/api/auth/me")
-@jwt_required()
-def auth_me():
-    claims = get_jwt() or {}
-    ident = get_jwt_identity()
-    return jsonify({
-        "email": claims.get("email") or ident,
-        "role": claims.get("role"),
-        "sub": ident,
-        "user": {
-            "email": claims.get("email") or ident,
-            "role": claims.get("role"),
-            "username": claims.get("username") or claims.get("email") or ident
-        }
-    })
-
-@bp.get("/api/admin/dashboard-analytics")
-@jwt_required()
-def dashboard_analytics():
-    total_students = db.session.scalar(sa.select(sa.func.count()).select_from(SinhVien)) or 0
-    total_courses  = db.session.scalar(sa.select(sa.func.count()).select_from(HocPhan)) or 0
-
-    total_kq = db.session.scalar(sa.select(sa.func.count()).select_from(KetQuaHocTap)) or 0
-    pass_kq = 0
-    conds = [
-        getattr(KetQuaHocTap, "DiemHe10") >= 4.0
-    ]
-    if hasattr(KetQuaHocTap, "KetQua"):
-        conds.append(getattr(KetQuaHocTap, "KetQua").in_(["Đạt", "Pass"]))
-    if hasattr(KetQuaHocTap, "DiemChu"):
-        conds.append(getattr(KetQuaHocTap, "DiemChu").in_(["A","B","C","D","P"]))
-    pass_kq = db.session.scalar(
-        sa.select(sa.func.count()).select_from(KetQuaHocTap).where(sa.or_(*conds))
-    ) or 0
-
-    return jsonify({"kpi": {
-        "total_students": int(total_students),
-        "total_courses": int(total_courses),
-        "pass_rate": round((pass_kq/total_kq) if total_kq else 0.0, 4),
-    }})
 
 @bp.get("/api/admin/users")
 @jwt_required()
@@ -336,21 +304,39 @@ def students_delete(masv):
 @jwt_required()
 def configs_get():
     rows = db.session.query(SystemConfig).all()
-    values = {x.ConfigKey: x.ConfigValue for x in rows}
-    meta   = {x.ConfigKey: x.Description or "" for x in rows}
+    db_values = {x.ConfigKey: x.ConfigValue for x in rows}
+
+    values = {}
+    meta = {}
+
+    for k in ALLOWED_CONFIG_KEYS:
+        values[k] = db_values.get(k, "")
+        meta[k] = CONFIG_META.get(k, "")
+
     return jsonify({"values": values, "meta": meta})
 
 @bp.put("/api/admin/configs")
 @roles_required("Admin")
 def configs_put():
-    values = (json_body().get("values") or {})
+    from .utils import audit_db
+    body = request.get_json(silent=True) or {}
+    values = (body.get("values") or {})
+    changed = {}
+
     for k, v in values.items():
+        if k not in ALLOWED_CONFIG_KEYS:
+            continue
         row = db.session.get(SystemConfig, k)
         if not row:
-            db.session.add(SystemConfig(ConfigKey=k, ConfigValue=str(v)))
+            row = SystemConfig(ConfigKey=k, ConfigValue=str(v))
+            db.session.add(row)
         else:
             row.ConfigValue = str(v)
-    db.session.commit(); return ok()
+        changed[k] = str(v)
+
+    db.session.commit()
+    audit_db("PUT /api/admin/configs", {"changed": changed}, affected="SystemConfig")
+    return jsonify({"msg": "OK", "changed": changed})
 
 @bp.get("/api/admin/warning/rules")
 @jwt_required()
@@ -369,8 +355,17 @@ def warning_rules_create():
 @bp.get("/api/admin/warning/cases")
 @jwt_required()
 def warning_cases():
-    # Join with WarningRule to get code/name
-    rows = db.session.query(WarningCase, WarningRule).join(WarningRule, WarningCase.RuleId == WarningRule.Id).order_by(WarningCase.Id.desc()).limit(200).all()
+    page = max(1, int(request.args.get("page", 1)))
+    size = max(1, min(100, int(request.args.get("size", 20))))
+    status = (request.args.get("status") or "open").strip()
+
+    q = db.session.query(WarningCase, WarningRule).join(WarningRule, WarningCase.RuleId == WarningRule.Id)
+    if status:
+        q = q.filter(WarningCase.Status == status)
+
+    total = q.count()
+    rows = q.order_by(WarningCase.Id.desc()).offset((page-1)*size).limit(size).all()
+
     items = []
     for c, r in rows:
         items.append({
@@ -381,19 +376,46 @@ def warning_cases():
             "RuleName": r.Name,
             "Threshold": r.Threshold,
             "Value": c.Value,
+            "Level": c.Level,
+            "Status": c.Status,
             "At": c.CreatedAt.strftime("%Y-%m-%d %H:%M") if c.CreatedAt else ""
         })
-    return jsonify({"items": items})
+    return jsonify({"total": total, "items": items})
 
 @bp.post("/api/admin/warning/scan")
 @roles_required("Admin")
 def warning_scan_run():
-    from .warning_scan import scan_all_warnings
+    from .services.warning_service import scan_warnings
     try:
-        res = scan_all_warnings()
-        return jsonify(res)
+        ma_lop = request.args.get("MaLop")
+        count = scan_warnings(ma_lop=ma_lop)
+        return jsonify({"created_cases": count})
     except Exception as e:
         return bad(f"Lỗi quét cảnh báo: {e}")
+
+@bp.put("/api/admin/warning/cases/<int:cid>/close")
+@jwt_required()
+def warning_close(cid: int):
+    from datetime import datetime, timezone
+    from .utils import audit_db
+    r = db.session.get(WarningCase, cid)
+    if not r:
+        return jsonify({"msg": "Không tìm thấy case"}), 404
+    r.Status = "closed"; r.ClosedAt = datetime.now(timezone.utc)
+    db.session.commit()
+    audit_db("PUT /api/admin/warning/cases/<id>/close", {"closed": cid}, affected="WarningCase")
+    return jsonify({"msg": "OK"})
+
+@bp.delete("/api/admin/warning/rules/<int:rid>")
+@jwt_required()
+def warning_rules_delete(rid: int):
+    from .utils import audit_db
+    r = db.session.get(WarningRule, rid)
+    if not r:
+        return jsonify({"msg": "Không tồn tại"}), 404
+    db.session.delete(r); db.session.commit()
+    audit_db("DELETE /api/admin/warning/rules/<id>", {"deleted": rid}, affected="WarningRule")
+    return jsonify({"msg": "OK"})
 
 def _import_resp(summary=None, preview=None, warnings=None):
     return jsonify({
@@ -403,7 +425,7 @@ def _import_resp(summary=None, preview=None, warnings=None):
     })
 
 @bp.post("/api/admin/import/grades")
-@roles_required("Admin")
+@roles_required("Admin", "Cán bộ đào tạo")
 def import_grades():
     if _importer and hasattr(_importer, "import_grades"):
         return _importer.import_grades(  # type: ignore
@@ -415,7 +437,7 @@ def import_grades():
     return _import_resp()
 
 @bp.post("/api/admin/import/class-roster")
-@roles_required("Admin")
+@roles_required("Admin", "Cán bộ đào tạo")
 def import_roster():
     if _importer and hasattr(_importer, "import_class_roster"):
         return _importer.import_class_roster(  # type: ignore
@@ -455,7 +477,27 @@ def template_grades_xlsx():
 @bp.get("/api/admin/import/logs")
 @jwt_required()
 def import_logs():
-    rows = db.session.query(ImportLog).order_by(ImportLog.When.desc()).limit(200).all()
-    items = [{"At": str(r.When), "Actor": r.Actor, "Endpoint": r.Endpoint,
-              "Filename": r.Filename, "Summary": r.Summary} for r in rows]
+    rows = db.session.query(ImportLog).order_by(ImportLog.When.desc()).limit(50).all()
+    items = [{
+        "RunId": r.RunId,
+        "At": r.When.isoformat(timespec="seconds"),
+        "Actor": r.Actor, "Endpoint": r.Endpoint,
+        "Params": r.Params, "Filename": r.Filename,
+        "Summary": r.Summary, "AffectedTable": r.AffectedTable,
+        "InsertedIds": r.InsertedIds
+    } for r in rows]
     return jsonify({"items": items})
+
+@bp.get("/api/admin/export/students.csv")
+@jwt_required()
+def export_students_csv():
+    q = (db.session.query(SinhVien.MaSV, SinhVien.HoTen, LopHoc.TenLop, NganhHoc.TenNganh)
+            .join(LopHoc, LopHoc.MaLop == SinhVien.MaLop, isouter=True)
+            .join(NganhHoc, NganhHoc.MaNganh == LopHoc.MaNganh, isouter=True))
+    buf = StringIO()
+    w = csv.writer(buf)
+    w.writerow(["MaSV","HoTen","Lop","Nganh"])
+    for msv, ht, lop, nganh in q.all():
+        w.writerow([msv, ht, lop or "", nganh or ""])
+    return Response(buf.getvalue(), mimetype="text/csv",
+                    headers={"Content-Disposition": "attachment; filename=students.csv"})
