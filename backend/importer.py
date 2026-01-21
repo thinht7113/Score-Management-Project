@@ -1,125 +1,12 @@
-# backend/importer.py
 from __future__ import annotations
-import io
-import json
-from dataclasses import dataclass, asdict
-from datetime import datetime
-from typing import Any, Dict, List, Optional, Tuple
-import pandas as pd
 from flask import request, jsonify
-from flask_jwt_extended import get_jwt_identity
-from numpy import select
-from passlib.hash import bcrypt
-from sqlalchemy import func
-from difflib import SequenceMatcher
-from .models import (
-    db,
-    HocPhan, LopHoc, NganhHoc,
-    NguoiDung, VaiTro,
-    SinhVien, KetQuaHocTap,
-    SystemConfig, ImportLog, GradeAuditLog,ChuongTrinhDaoTao
-)
-
-
-@dataclass
-class ImportSummary:
-    rows_seen: int = 0
-    inserted: int = 0
-    updated: int = 0
-    skipped: int = 0
-    errors: List[Dict[str, Any]] = None
-    suggestions: List[str] = None
-    sample_rows: List[Dict[str, Any]] = None
-    detected_format: Optional[str] = None  # TALL|WIDE|None
-
-    def to_json(self) -> Dict[str, Any]:
-        return asdict(self)
-
-
-
-def _actor_id() -> int:
-    try:
-        ident = get_jwt_identity()
-        return int(ident) if ident is not None else 0
-    except Exception:
-        return 0
-
-
-def _get_file_df() -> Tuple[pd.DataFrame, str]:
-    f = request.files.get("file")
-    if not f:
-        raise ValueError("Thiếu file (form field 'file')")
-    filename = f.filename or "upload.xlsx"
-    content = f.read()
-    buf = io.BytesIO(content)
-    try:
-        if filename.lower().endswith(".csv"):
-            df = pd.read_csv(buf)
-        else:
-            df = pd.read_excel(buf, dtype=str)
-    except Exception as e:
-        raise ValueError(f"Lỗi đọc file: {e}")
-    return df, filename
-
-
-def _audit_import(*, endpoint: str, affected: str, summary: Dict[str, Any], filename: Optional[str] = None):
-    try:
-        actor = get_jwt_identity() or ""
-    except Exception:
-        actor = ""
-    try:
-        log = ImportLog(
-            When=datetime.utcnow(),
-            Actor=str(actor),
-            Endpoint=endpoint,
-            Params=json.dumps(request.args.to_dict(), ensure_ascii=False),
-            Filename=filename,
-            Summary=json.dumps(summary, ensure_ascii=False),
-            AffectedTable=affected,
-            InsertedIds=None,
-        )
-        db.session.add(log)
-        db.session.commit()
-    except Exception:
-        db.session.rollback()
-
-
-def _ensure_student_user(masv: str, email_domain: str) -> int:
-    u = NguoiDung.query.filter_by(TenDangNhap=masv).first()
-    if u:
-        return u.MaNguoiDung
-    vr = VaiTro.query.filter_by(TenVaiTro="Sinh viên").first()
-    u = NguoiDung(
-        TenDangNhap=masv,
-        MatKhauMaHoa=bcrypt.hash(masv),
-        Email=f"{masv}@{email_domain}",
-        TrangThai="Hoạt động",
-        MaVaiTro=vr.MaVaiTro if vr else None,
-    )
-    db.session.add(u); db.session.flush()
-    return u.MaNguoiDung
-
-
-def _retake_apply_policy(masv: str, mahp: str, new_rec: KetQuaHocTap, policy: str = "keep-latest"):
-    policy = (policy or "keep-latest").strip().lower()
-    existing = KetQuaHocTap.query.filter_by(MaSV=masv, MaHP=mahp).order_by(KetQuaHocTap.MaKQ.asc()).all()
-    if not existing:
-        new_rec.LaDiemCuoiCung = True
-        return
-    if policy == "best":
-        all_recs = existing + [new_rec]
-        best = max(all_recs, key=lambda r: (r.DiemHe4 or 0.0, r.HocKy or ""))
-        for r in all_recs:
-            r.LaDiemCuoiCung = (r is best)
-    else:
-        for r in existing:
-            r.LaDiemCuoiCung = False
-        new_rec.LaDiemCuoiCung = True
-
-
+from sqlalchemy import select
+from .models import db, HocPhan, ChuongTrinhDaoTao, NganhHoc, LopHoc, SinhVien, SystemConfig, KetQuaHocTap
+from .utils_import import get_file_df, norm_key, audit_import, ensure_student_user, parse_date, norm_text
+import pandas as pd
+import json
 
 def import_curriculum(*, preview: bool = True, allow_update: bool = True, replace: bool = False):
-
     ma_nganh = (request.args.get("manganh") or "").strip().upper()
     if not ma_nganh:
         return jsonify({"msg": "Thiếu tham số 'manganh'."}), 400
@@ -134,31 +21,15 @@ def import_curriculum(*, preview: bool = True, allow_update: bool = True, replac
         return jsonify({"msg": f"Ngành '{ma_nganh}' không tồn tại."}), 400
 
     try:
-        df, filename = _get_file_df()
-    except NameError:
-        f = request.files.get("file")
-        if not f:
-            return jsonify({"msg": "Thiếu file upload (form field 'file')."}), 400
-        filename = f.filename
-        if filename.lower().endswith((".xlsx", ".xls")):
-            df = pd.read_excel(f)
-        else:
-            df = pd.read_csv(f)
-    except Exception as e:
-        return jsonify({"msg": f"Lỗi đọc file: {e}"}), 400
+        df, filename = get_file_df()
+    except ValueError as e:
+        return jsonify({"msg": str(e)}), 400
 
-    import re, unicodedata
-    def _norm(s: str) -> str:
-        s = unicodedata.normalize("NFKD", str(s or ""))
-        s = "".join(c for c in s if not unicodedata.combining(c))
-        s = re.sub(r"\s+", "", s.lower())
-        return s
-
-    colmap = {_norm(c): c for c in df.columns}
+    colmap = {norm_key(c): c for c in df.columns}
 
     def _col(*aliases):
         for a in aliases:
-            key = _norm(a)
+            key = norm_key(a)
             if key in colmap:
                 return colmap[key]
         return None
@@ -248,7 +119,7 @@ def import_curriculum(*, preview: bool = True, allow_update: bool = True, replac
         db.session.commit()
 
     try:
-        _audit_import(
+        audit_import(
             endpoint="/api/admin/import/curriculum",
             affected="HocPhan,ChuongTrinhDaoTao",
             summary=stats, filename=filename
@@ -265,13 +136,6 @@ def import_curriculum(*, preview: bool = True, allow_update: bool = True, replac
     }), 200
 
 def import_class_roster(*, preview: bool = True, allow_update: bool = True):
-
-    import io, math, unicodedata
-    from datetime import datetime, timedelta
-    import pandas as pd
-    from flask import request, jsonify
-    from passlib.hash import bcrypt
-
     HEADER_TOKENS = {
         "masinhvien": {"masinhvien", "ma sinh vien", "masv", "mssv", "studentid", "id", "mã sinh viên"},
         "hovaten": {"hovaten", "ho va ten", "hoten", "ten", "fullname", "name", "họ và tên"},
@@ -279,62 +143,21 @@ def import_class_roster(*, preview: bool = True, allow_update: bool = True):
         "noisinh": {"noisinh", "noi sinh", "quequan", "que quan", "birthplace", "nơi sinh"},
     }
 
-
     def _is_header_like(masv_txt: str, hoten_txt: str, ngs_raw: str, nois_txt: str) -> bool:
-        m = _norm_key(masv_txt or "")
-        h = _norm_key(hoten_txt or "")
-        d = _norm_key(ngs_raw or "")
-        n = _norm_key(nois_txt or "")
+        m = norm_key(masv_txt or "")
+        h = norm_key(hoten_txt or "")
+        d = norm_key(ngs_raw or "")
+        n = norm_key(nois_txt or "")
         return (
                 m in HEADER_TOKENS["masinhvien"] or
                 h in HEADER_TOKENS["hovaten"] or
                 d in HEADER_TOKENS["ngaysinh"] or
                 n in HEADER_TOKENS["noisinh"]
         )
-    def _norm_text(s: str) -> str:
-        s = unicodedata.normalize("NFKD", s or "")
-        s = "".join(c for c in s if not unicodedata.combining(c))
-        return s.strip().lower()
-
-    def _norm_key(s: str) -> str:
-        s = _norm_text(s)
-        for ch in (" ", "_", "-", ".", "/"):
-            s = s.replace(ch, "")
-        return s
-
-    def _parse_date(v):
-        if v is None or (isinstance(v, float) and math.isnan(v)) or str(v).strip() == "":
-            return None
-        if isinstance(v, (int, float)) and not isinstance(v, bool):
-            try:
-                return (datetime(1899, 12, 30) + timedelta(days=float(v))).date()
-            except Exception:
-                pass
-        dt = pd.to_datetime(str(v).replace("-", "/"), dayfirst=True, errors="coerce")
-        return None if pd.isna(dt) else dt.date()
 
     def _email_domain() -> str:
         row = db.session.get(SystemConfig, "EMAIL_DOMAIN")
         return row.ConfigValue if row else "vui.edu.vn"
-
-    def _ensure_role_sinhvien_id():
-        r = db.session.query(VaiTro).filter(VaiTro.TenVaiTro.in_(["SinhVien", "Sinh Viên", "student"])).first()
-        if not r:
-            r = VaiTro(TenVaiTro="SinhVien"); db.session.add(r); db.session.flush()
-        return r.MaVaiTro
-
-    def _ensure_user_for_sv(masv: str, email_domain: str) -> int:
-        u = db.session.query(NguoiDung).filter_by(TenDangNhap=masv).first()
-        if u: return u.MaNguoiDung
-        u = NguoiDung(
-            TenDangNhap=masv,
-            MatKhauMaHoa=bcrypt.hash(masv),
-            Email=f"{masv}@{email_domain}".lower(),
-            TrangThai="Hoạt động",
-            MaVaiTro=_ensure_role_sinhvien_id(),
-        )
-        db.session.add(u); db.session.flush()
-        return u.MaNguoiDung
 
     lop = (request.args.get("lop") or "").strip().upper()
     if not lop:
@@ -354,29 +177,17 @@ def import_class_roster(*, preview: bool = True, allow_update: bool = True):
         }
         return jsonify(payload), 400
 
-    if "file" not in request.files or not request.files["file"].filename:
-        payload = {
-            "summary": {"total_rows": 0, "created": 0, "updated": 0, "skipped": 0,
-                        "warnings": ["Chưa chọn tệp để nhập"]},
-            "preview": [], "warnings": ["Chưa chọn tệp để nhập"], "file": None
-        }
-        return jsonify(payload), 400
-
-    up = request.files["file"]; fname = up.filename; raw = up.read()
     try:
-        if fname.lower().endswith(".csv"):
-            df = pd.read_csv(io.BytesIO(raw), dtype=object, encoding="utf-8")
-        else:
-            df = pd.read_excel(io.BytesIO(raw), dtype=object)
-    except Exception as e:
+        df, fname = get_file_df()
+    except ValueError as e:
         payload = {
             "summary": {"total_rows": 0, "created": 0, "updated": 0, "skipped": 0,
-                        "warnings": [f"Lỗi đọc file: {e}"]},
-            "preview": [], "warnings": [f"Lỗi đọc file: {e}"], "file": fname
+                        "warnings": [str(e)]},
+            "preview": [], "warnings": [str(e)], "file": None
         }
         return jsonify(payload), 400
 
-    cols = { _norm_key(c): c for c in df.columns }
+    cols = { norm_key(c): c for c in df.columns }
     need_map = {
         "masinhvien": ["mã sinh viên","masinhvien","ma sinh vien","masv","mssv","studentid","id"],
         "hovaten":    ["họ và tên","hovaten","ho va ten","hoten","ten","fullname","name"],
@@ -386,7 +197,7 @@ def import_class_roster(*, preview: bool = True, allow_update: bool = True):
     resolved = {}
     for key, aliases in need_map.items():
         for a in aliases:
-            k = _norm_key(a)
+            k = norm_key(a)
             if k in cols: resolved[key] = cols[k]; break
 
     missing = [k for k in need_map if k not in resolved]
@@ -413,7 +224,7 @@ def import_class_roster(*, preview: bool = True, allow_update: bool = True):
             warnings.append(f"Dòng {i + 2}: bỏ qua vì trùng tiêu đề cột")
             continue
 
-        ngs = _parse_date(ngs_raw) if ngs_raw else None
+        ngs = parse_date(ngs_raw) if ngs_raw else None
 
         if not masv and not hoten:
             continue
@@ -424,7 +235,7 @@ def import_class_roster(*, preview: bool = True, allow_update: bool = True):
             warnings.append(f"Dòng {i+2}: Thiếu Mã SV hoặc Họ tên")
             continue
 
-        uid = _ensure_user_for_sv(masv, email_domain)
+        uid = ensure_student_user(masv, email_domain)
         sv = db.session.get(SinhVien, masv)
         if not sv:
             sv = SinhVien(MaSV=masv, HoTen=hoten, NgaySinh=ngs, NoiSinh=nois, MaLop=lop, MaNguoiDung=uid)
@@ -466,37 +277,33 @@ def import_class_roster(*, preview: bool = True, allow_update: bool = True):
         return jsonify({"summary": summary, "preview": preview_rows, "warnings": summary["warnings"], "file": fname}), 400
 
     try:
-        db.session.add(ImportLog(Endpoint="/api/admin/import/class-roster",
-                                 Summary=json.dumps(summary, ensure_ascii=False),
-                                 Filename=fname, AffectedTable="SinhVien"))
-        db.session.commit()
+        audit_import(Endpoint="/api/admin/import/class-roster",
+                     summary=summary,
+                     filename=fname, affected="SinhVien")
     except Exception:
-        db.session.rollback()
+        pass
 
     return jsonify({"summary": summary, "preview": preview_rows, "warnings": warnings, "file": fname}), 200
-
 
 def import_grades(*, preview: bool = True,
                   allow_update: bool = True,
                   hoc_ky_default: str | None = None,
                   retake_policy: str = "keep-latest"):
 
-    import re, unicodedata, math
-    import pandas as pd
-    from flask import request, jsonify
-    from passlib.hash import bcrypt
+    import re, math
     from decimal import Decimal, ROUND_HALF_UP
+    from difflib import SequenceMatcher
     EPS = Decimal("0.05")
-    tbc_policy = (request.args.get("tbc_policy") or "calc_only").strip().lower()
 
     def _norm_subject_name(s: str) -> str:
-        s = _norm_key(str(s))
+        s = norm_key(str(s))
         s = re.sub(r'^(diem|diemmon|mon|hp|hocphan|tbc|tbcht|tbcht4|gpa|xeploai)+', '', s)
         s = re.sub(r'\(.*?\)', '', s)
         s = re.sub(r'(lan|thi|hk)\d+$', '', s)
         s = re.sub(r'_{2,}', '_', s).strip('_')
-        s = s.replace('lt', 'laptrinh')  # 'LT C' -> 'laptrinhc'
+        s = s.replace('lt', 'laptrinh')
         return s
+
     def _fuzzy_pick_subject(key_norm: str, by_ten: dict, threshold: float = 0.78):
         best, score = None, 0.0
         for k, h in by_ten.items():
@@ -516,17 +323,6 @@ def import_grades(*, preview: bool = True,
             return True
         return False
 
-    def _norm_text(s: str) -> str:
-        s = unicodedata.normalize("NFKD", s or "")
-        s = "".join(c for c in s if not unicodedata.combining(c))
-        return s.strip().lower()
-    def _norm_key(s: str) -> str:
-        s = _norm_text(s)
-        s = re.sub(r'[\s\u00A0\u200B-\u200D\uFEFF]+', '', s)
-        for ch in ("_", "-", ".", "/"):
-            s = s.replace(ch, "")
-        return s
-
     def _num_2(x) -> float | None:
         if x is None:
             return None
@@ -544,16 +340,6 @@ def import_grades(*, preview: bool = True,
                 return None
         return float(v.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
 
-    def _parse_date(v):
-        if v is None or (isinstance(v, float) and math.isnan(v)) or str(v).strip() == "":
-            return None
-        if isinstance(v, (int, float)) and not isinstance(v, bool):
-            from datetime import datetime, timedelta
-            try: return (datetime(1899,12,30)+timedelta(days=float(v))).date()
-            except Exception: pass
-        dt = pd.to_datetime(str(v).replace("-","/"), dayfirst=True, errors="coerce")
-        return None if pd.isna(dt) else dt.date()
-
     def _grade_letter(v: float) -> tuple[str, float, str]:
         if v >= 8.5:   return "A", 4.0, "Đạt"
         if v >= 7.8:   return "B+", 3.5, "Đạt"
@@ -564,26 +350,11 @@ def import_grades(*, preview: bool = True,
         if v >= 4.0:   return "D",  1.0, "Đạt"
         return "F", 0.0, "Không đạt"
 
-    def _email_domain() -> str:
-        row = db.session.get(SystemConfig, "EMAIL_DOMAIN")
-        return row.ConfigValue if row else "vui.edu.vn"
-
-    def _ensure_role_sinhvien_id():
-        r = db.session.query(VaiTro).filter(VaiTro.TenVaiTro.in_(["SinhVien","Sinh Viên","student"])).first()
-        if not r:
-            r = VaiTro(TenVaiTro="SinhVien"); db.session.add(r); db.session.flush()
-        return r.MaVaiTro
-
-    def _ensure_user_and_student(masv: str, ho_ten: str|None, ngay_sinh, noi_sinh, lop: str|None):
-        u = db.session.query(NguoiDung).filter_by(TenDangNhap=masv).first()
-        if not u:
-            u = NguoiDung(TenDangNhap=masv, MatKhauMaHoa=bcrypt.hash(masv),
-                          Email=f"{masv}@{_email_domain()}".lower(),
-                          TrangThai="Hoạt động", MaVaiTro=_ensure_role_sinhvien_id())
-            db.session.add(u); db.session.flush()
+    def _ensure_user_and_student_wrapper(masv: str, ho_ten: str|None, ngay_sinh, noi_sinh, lop: str|None):
+        uid = ensure_student_user(masv, "vui.edu.vn") # Hardcoded default for now
         sv = db.session.get(SinhVien, masv)
         if not sv:
-            sv = SinhVien(MaSV=masv, HoTen=(ho_ten or masv), MaNguoiDung=u.MaNguoiDung)
+            sv = SinhVien(MaSV=masv, HoTen=(ho_ten or masv), MaNguoiDung=uid)
             if ngay_sinh: setattr(sv, "NgaySinh", ngay_sinh)
             if noi_sinh is not None: setattr(sv, "NoiSinh", noi_sinh)
             if lop:
@@ -612,6 +383,8 @@ def import_grades(*, preview: bool = True,
         )
         return {mahp: (int(hk) if hk is not None else None) for (mahp, hk) in rows}
 
+    from sqlalchemy import func
+
     lop = (request.args.get("lop") or "").strip().upper()
     if lop and not db.session.get(LopHoc, lop):
         return jsonify({"summary":{"total_rows":0,"created":0,"updated":0,"skipped":0,
@@ -621,12 +394,12 @@ def import_grades(*, preview: bool = True,
     ctdt_map = _build_ctdt_hocky_map_for_lop(lop)
 
     try:
-        df, fname = _get_file_df()
-    except Exception as e:
+        df, fname = get_file_df()
+    except ValueError as e:
         return jsonify({"summary":{"total_rows":0,"created":0,"updated":0,"skipped":0,"warnings":[str(e)]},
                         "preview":[], "warnings":[str(e)], "file":None}), 400
 
-    cols_norm = {_norm_key(c): c for c in df.columns}
+    cols_norm = {norm_key(c): c for c in df.columns}
     alias = {
         "stt": {"stt","so","sott","sothutu"},
         "masv": {"masv","ma sv","mssv","masinhvien","ma sinh vien","id","studentid","mãsinhviên"},
@@ -640,7 +413,7 @@ def import_grades(*, preview: bool = True,
     }
     def _col(key):
         for a in alias.get(key,set()):
-            k=_norm_key(a)
+            k=norm_key(a)
             if k in cols_norm: return cols_norm[k]
         return None
 
@@ -657,20 +430,20 @@ def import_grades(*, preview: bool = True,
                         "preview":[], "warnings":["Thiếu cột Mã sinh viên"], "file":fname}), 400
 
     META_KEYS = {
-        _norm_key("STT"), _norm_key("Mã sinh viên"), _norm_key("Họ và tên"),
-        _norm_key("Ngày sinh"), _norm_key("Nơi sinh"), _norm_key("Tên lớp"),
-        _norm_key("TBC HT10"), _norm_key("Số HP nợ"), _norm_key("Số tín chỉ nợ"),
-        _norm_key("Ngày tổng hợp"), _norm_key("Người tổng hợp")
+        norm_key("STT"), norm_key("Mã sinh viên"), norm_key("Họ và tên"),
+        norm_key("Ngày sinh"), norm_key("Nơi sinh"), norm_key("Tên lớp"),
+        norm_key("TBC HT10"), norm_key("Số HP nợ"), norm_key("Số tín chỉ nợ"),
+        norm_key("Ngày tổng hợp"), norm_key("Người tổng hợp")
     }
     for k in ("stt", "masv", "hoten", "ngaysinh", "noisinh", "tenlop", "tbcht10", "sohpno", "sotcno"):
         for a in alias.get(k, set()):
-            META_KEYS.add(_norm_key(a))
+            META_KEYS.add(norm_key(a))
     start_idx = list(df.columns).index(col_masv) + 1 if col_masv in df.columns else 0
     subject_cols = []
     for idx, c in enumerate(df.columns):
         if idx < start_idx:
             continue
-        key = _norm_key(str(c))
+        key = norm_key(str(c))
         if _is_meta_header(key):
             continue
         subject_cols.append(c)
@@ -689,12 +462,12 @@ def import_grades(*, preview: bool = True,
     for i, row in df.iterrows():
         masv = str(row[col_masv]).strip() if pd.notna(row[col_masv]) else ""
         if not masv: continue
-        if _norm_key(masv) in header_tokens:
+        if norm_key(masv) in header_tokens:
             skipped += 1; warnings.append(f"Dòng {i+2}: bỏ qua vì trùng tiêu đề"); continue
 
         total += 1
         hoten = (str(row[col_hoten]).strip() if (col_hoten and pd.notna(row[col_hoten])) else None)
-        ngs   = _parse_date(row[col_ngs]) if (col_ngs and pd.notna(row[col_ngs])) else None
+        ngs   = parse_date(row[col_ngs]) if (col_ngs and pd.notna(row[col_ngs])) else None
         nois  = (str(row[col_nois]).strip() if (col_nois and pd.notna(row[col_nois])) else None)
         tb10  = _num_2(row[col_tb10]) if (col_tb10 and pd.notna(row[col_tb10])) else None
 
@@ -713,7 +486,7 @@ def import_grades(*, preview: bool = True,
                 skipped += 1
                 warnings.append(f"Dòng {i+2}: MaSV '{masv}' chưa có, thiếu ?lop để gán lớp → bỏ qua")
                 continue
-            _ensure_user_and_student(masv, hoten, ngs, nois, lop)
+            _ensure_user_and_student_wrapper(masv, hoten, ngs, nois, lop)
         else:
             try:
                 if tb10 is not None:
@@ -730,7 +503,7 @@ def import_grades(*, preview: bool = True,
 
         w_sum=Decimal("0"); w_cnt=Decimal("0")
         for col in subject_cols:
-            key = _norm_key(str(col))
+            key = norm_key(str(col))
             if key in META_KEYS:
                 continue
 
@@ -832,5 +605,5 @@ def import_grades(*, preview: bool = True,
         summary["warnings"].append(f"Lỗi commit DB: {e}")
         return jsonify({"summary":summary,"preview":preview_rows,"warnings":summary["warnings"],"file":fname}), 400
 
-    _audit_import(endpoint="/api/admin/import/grades", affected="KetQuaHocTap", summary=summary, filename=fname)
+    audit_import(endpoint="/api/admin/import/grades", affected="KetQuaHocTap", summary=summary, filename=fname)
     return jsonify({"summary":summary,"preview":preview_rows,"warnings":warnings,"file":fname}), 200

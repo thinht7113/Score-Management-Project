@@ -1,0 +1,16 @@
+/app/backend/routes/advisor_routes.py:4: FutureWarning:
+
+All support for the `google.generativeai` package has ended. It will no longer be receiving
+updates or bug fixes. Please switch to the `google.genai` package as soon as possible.
+See README for more details:
+
+https://github.com/google-gemini/deprecated-generative-ai-python/blob/main/README.md
+
+  import google.generativeai as genai
+ * Serving Flask app 'backend.app'
+ * Debug mode: off
+2026-01-21 03:27:57,109 [INFO] [31m[1mWARNING: This is a development server. Do not use it in a production deployment. Use a production WSGI server instead.[0m
+ * Running on http://127.0.0.1:5000
+2026-01-21 03:27:57,109 [INFO] [33mPress CTRL+C to quit[0m
+2026-01-21 03:28:18,687 [INFO] 127.0.0.1 - - [21/Jan/2026 03:28:18] "POST /api/auth/login HTTP/1.1" 200 -
+2026-01-21 03:28:18,705 [INFO] 127.0.0.1 - - [21/Jan/2026 03:28:18] "GET /api/admin/warning/cases HTTP/1.1" 200 -
